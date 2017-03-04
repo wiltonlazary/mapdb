@@ -2,10 +2,13 @@ package org.mapdb
 
 import org.mapdb.serializer.GroupSerializer
 import org.mapdb.volume.Volume
+import java.io.ObjectStreamException
 import java.util.*
 import java.util.concurrent.ConcurrentMap
 import java.util.concurrent.ConcurrentNavigableMap
+import java.util.concurrent.ConcurrentSkipListMap
 import java.util.function.BiConsumer
+import java.io.Serializable
 
 /**
  * Read only Sorted Table Map. It stores data in table and uses binary search to find records
@@ -17,7 +20,7 @@ class SortedTableMap<K,V>(
         val pageSize:Long,
         protected val volume: Volume,
         override val hasValues: Boolean = false
-): ConcurrentMap<K, V>, ConcurrentNavigableMap<K, V>, ConcurrentNavigableMapExtra<K,V> {
+): ConcurrentMap<K, V>, ConcurrentNavigableMap<K, V>, ConcurrentNavigableMapExtra<K,V>, Serializable{
 
     abstract class Sink<K, V> : Pump.Sink<Pair<K, V>, SortedTableMap<K, V>>() {
         fun put(key: K, value: V) {
@@ -689,6 +692,10 @@ class SortedTableMap<K,V>(
         throw UnsupportedOperationException("read-only")
     }
 
+    override fun putOnly(key: K?, value: V?) {
+        throw UnsupportedOperationException("read-only")
+    }
+
     override fun putAll(from: Map<out K?, V?>) {
         throw UnsupportedOperationException("read-only")
     }
@@ -701,7 +708,7 @@ class SortedTableMap<K,V>(
         throw UnsupportedOperationException("read-only")
     }
 
-    override fun remove(key: Any?, value: Any?): Boolean {
+    override fun remove(key: K, value: V): Boolean {
         throw UnsupportedOperationException("read-only")
     }
 
@@ -1654,7 +1661,7 @@ class SortedTableMap<K,V>(
                 val comp = if(loInclusive) -1 else 0
                 keysLoop@ while(true){
                     loadNextNode()
-                    val keys = nodeKeys!!
+                    val keys = nodeKeys ?: return
                     //iterate over node until bigger entry is found
                     var pos = 0
                     while(true){
@@ -1742,7 +1749,7 @@ class SortedTableMap<K,V>(
                 val comp = if(loInclusive) -1 else 0
                 keysLoop@ while(true){
                     loadNextNode()
-                    val keys = nodeKeys!!
+                    val keys = nodeKeys ?: return
                     //iterate over node until bigger entry is found
                     var pos = 0
                     while(true){
@@ -1832,7 +1839,7 @@ class SortedTableMap<K,V>(
                 val comp = if(loInclusive) -1 else 0
                 keysLoop@ while(true){
                     loadNextNode()
-                    val keys = nodeKeys!!
+                    val keys = nodeKeys ?: return
                     //iterate over node until bigger entry is found
                     var pos = 0
                     while(true){
@@ -2188,4 +2195,13 @@ class SortedTableMap<K,V>(
     }
 
 
+
+    @Throws(ObjectStreamException::class)
+    private fun writeReplace(): Any {
+        val ret = ConcurrentSkipListMap<Any?, Any?>()
+        forEach { k, v ->
+            ret.put(k, v)
+        }
+        return ret
+    }
 }

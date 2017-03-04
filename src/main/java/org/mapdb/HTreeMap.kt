@@ -5,9 +5,10 @@ import org.eclipse.collections.api.map.primitive.MutableLongLongMap
 import org.eclipse.collections.impl.set.mutable.primitive.LongHashSet
 import java.io.Closeable
 import java.security.SecureRandom
-
 import java.util.*
-import java.util.concurrent.*
+import java.util.concurrent.ConcurrentMap
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReadWriteLock
 import java.util.function.BiConsumer
 
@@ -116,8 +117,11 @@ class HTreeMap<K,V>(
     protected val locks:Array<ReadWriteLock?> = Array(segmentCount, {Utils.newReadWriteLock(isThreadSafe)})
 
     /** true if Eviction is executed inside user thread, as part of get/put etc operations */
+    //TODO make protected
     val isForegroundEviction:Boolean = expireExecutor==null &&
             (expireCreateQueues!=null || expireUpdateQueues!=null || expireGetQueues!=null)
+
+    protected val modificationListenersEmpty = modificationListeners==null || modificationListeners.isEmpty()
 
     init{
         if(segmentCount!=stores.size)
@@ -303,6 +307,14 @@ class HTreeMap<K,V>(
     }
 
     override fun put(key: K?, value: V?): V? {
+        return put2(key, value, false)
+    }
+
+    override fun putOnly(key: K?, value: V?){
+        put2(key, value, true)
+    }
+
+    protected fun put2(key: K?, value: V?, noValueExpand:Boolean): V? {
         if (key == null || value == null)
             throw NullPointerException()
 
@@ -321,11 +333,11 @@ class HTreeMap<K,V>(
             if(isForegroundEviction)
                 expireEvictSegment(segment)
 
-            return putprotected(hash, key, value,false)
+            return putProtected(hash, key, value, false, noValueExpand)
         }
     }
 
-    protected fun putprotected(hash:Int, key:K, value:V, triggered:Boolean):V?{
+    protected fun putProtected(hash:Int, key:K, value:V, triggered:Boolean, noValueExpand:Boolean):V?{
         val segment = hashToSegment(hash)
         if(CC.ASSERT)
             Utils.assertWriteLock(locks[segment])
@@ -374,7 +386,9 @@ class HTreeMap<K,V>(
 
             if (keySerializer.equals(oldKey, key)) {
                 //match found, update existing value
-                val oldVal = valueUnwrap(segment, leaf[i + 1])
+                val oldVal =
+                        if(noValueExpand && modificationListenersEmpty) null
+                        else valueUnwrap(segment, leaf[i + 1])
 
                 if (expireUpdateQueues != null) {
                     //update expiration stuff
@@ -395,7 +409,7 @@ class HTreeMap<K,V>(
                                     timestamp = if(expireUpdateTTL==-1L) 0L else System.currentTimeMillis()+expireUpdateTTL,
                                     value=oldNode.value, nodeRecid = nodeRecid )
 
-                            leaf = leaf.clone()
+                            leaf = leaf.copyOf()
                             leaf[i + 2] = expireId(nodeRecid, QUEUE_UPDATE)
                             store.update(leafRecid, leaf, leafSerializer)
                         }
@@ -404,7 +418,7 @@ class HTreeMap<K,V>(
                         val expireRecid = expireUpdateQueues[segment].put(
                                 if(expireUpdateTTL==-1L) 0L else System.currentTimeMillis()+expireUpdateTTL,
                                 leafRecid);
-                        leaf = leaf.clone()
+                        leaf = leaf.copyOf()
                         leaf[i + 2] = expireId(expireRecid, QUEUE_UPDATE)
                         store.update(leafRecid, leaf, leafSerializer)
                     }
@@ -415,7 +429,7 @@ class HTreeMap<K,V>(
                     store.update(leaf[i+1] as Long, value, valueSerializer)
                 }else{
                     //stored inside leaf, so clone leaf, swap and update
-                    leaf = leaf.clone();
+                    leaf = leaf.copyOf();
                     leaf[i+1] = value as Any;
                     store.update(leafRecid, leaf, leafSerializer)
                 }
@@ -604,7 +618,7 @@ class HTreeMap<K,V>(
             if(ret==null && valueLoader !=null){
                 ret = valueLoader!!(key)
                 if(ret!=null)
-                    putprotected(hash, key, ret, true)
+                    putProtected(hash, key, ret, true, true)
             }
             return ret
         }
@@ -670,7 +684,7 @@ class HTreeMap<K,V>(
                         timestamp = if(expireGetTTL==-1L) 0L else System.currentTimeMillis()+expireGetTTL,
                         value = oldNode.value, nodeRecid = nodeRecid)
                 //update queue id
-                leaf1 = leaf1.clone()
+                leaf1 = leaf1.copyOf()
                 leaf1[i + 2] = expireId(nodeRecid, QUEUE_GET)
                 store.update(leafRecid, leaf1, leafSerializer)
             }
@@ -679,7 +693,7 @@ class HTreeMap<K,V>(
             val expireRecid = expireGetQueues[segment].put(
                     if(expireGetTTL==-1L) 0L else System.currentTimeMillis()+expireGetTTL,
                     leafRecid);
-            leaf1 = leaf1.clone()
+            leaf1 = leaf1.copyOf()
             leaf1[i + 2] = expireId(expireRecid, QUEUE_GET)
             store.update(leafRecid, leaf1, leafSerializer)
 
@@ -731,7 +745,7 @@ class HTreeMap<K,V>(
                 expireEvictSegment(segment)
 
             return getprotected(hash,key, updateQueue = false) ?:
-                    putprotected(hash, key, value,false)
+                    putProtected(hash, key, value,false, false)
         }
     }
 
@@ -748,12 +762,12 @@ class HTreeMap<K,V>(
 
             if (getprotected(hash, key, updateQueue = false) != null)
                 return false
-            putprotected(hash, key, value, false)
+            putProtected(hash, key, value, false, true)
             return true;
         }
     }
 
-    override fun remove(key: Any?, value: Any?): Boolean {
+    override fun remove(key: K?, value: V?): Boolean {
         if(key == null || value==null)
             throw NullPointerException()
 
@@ -784,7 +798,7 @@ class HTreeMap<K,V>(
 
             val valueIn = getprotected(hash, key, updateQueue = false);
             if (valueIn != null && valueSerializer.equals(valueIn, oldValue)) {
-                putprotected(hash, key, newValue,false);
+                putProtected(hash, key, newValue, false, true);
                 return true;
             } else {
                 return false;
@@ -803,7 +817,7 @@ class HTreeMap<K,V>(
                 expireEvictSegment(segment)
 
             if (getprotected(hash, key,updateQueue = false)!=null) {
-                return putprotected(hash, key, value, false);
+                return putProtected(hash, key, value, false, false);
             } else {
                 return null;
             }
@@ -946,7 +960,7 @@ class HTreeMap<K,V>(
         }
 
         override fun remove(element: MutableMap.MutableEntry<K?, V?>): Boolean {
-            return this@HTreeMap.remove(element.key as Any?, element.value)
+            return this@HTreeMap.remove(element.key, element.value)
         }
 
 

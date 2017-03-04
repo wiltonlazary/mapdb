@@ -1,5 +1,6 @@
 package org.mapdb
 
+import com.google.common.collect.MapMaker
 import java.io.File
 import java.nio.file.Path
 import java.util.*
@@ -160,29 +161,108 @@ internal object Utils {
         }
     }
 
-    class SingleEntryReadWriteLock(
-            val lock:ReentrantReadWriteLock=ReentrantReadWriteLock()
-    ):ReadWriteLock by lock{
+    class SingleEntryReadWriteLock:ReadWriteLock{
 
-        val origWriteLock = lock.writeLock()
-        val newWriteLock = object: Lock by origWriteLock{
-            private fun ensureNotLocked() {
-                if (lock.isWriteLockedByCurrentThread)
-                    throw IllegalMonitorStateException("already locked by current thread")
+        //TODO private
+        val lock:ReentrantReadWriteLock=ReentrantReadWriteLock()
+
+        private val readLockThreads = MapMaker().weakKeys().makeMap<Thread, Lock>()
+
+        fun checkNotLocked() {
+            if (lock.isWriteLockedByCurrentThread)
+                throw IllegalMonitorStateException("can not lock, already locked for write by current thread")
+            if(readLockThreads.containsKey(Thread.currentThread()))
+                throw IllegalMonitorStateException("can not lock, already locked for read by current thread")
+        }
+
+        fun checkWriteLocked() {
+            if (!lock.isWriteLockedByCurrentThread)
+                throw IllegalMonitorStateException("not locked for write")
+        }
+
+        fun checkReadLocked() {
+            if(!lock.isWriteLockedByCurrentThread
+                    && !readLockThreads.containsKey(Thread.currentThread()))
+                throw IllegalMonitorStateException("not locked for read")
+        }
+
+
+        private val origWriteLock = lock.writeLock()
+        private val origReadLock = lock.readLock()
+
+        private val newWriteLock = object: Lock{
+            override fun unlock() {
+                origWriteLock.unlock()
+            }
+
+            override fun tryLock(): Boolean {
+                checkNotLocked()
+                return origWriteLock.tryLock()
+            }
+
+            override fun tryLock(time: Long, unit: TimeUnit?): Boolean {
+                checkNotLocked()
+                return origWriteLock.tryLock(time, unit)
+            }
+
+            override fun newCondition(): Condition {
+                throw UnsupportedOperationException()
             }
 
             override fun lock() {
-                ensureNotLocked()
+                checkNotLocked()
                 origWriteLock.lock()
             }
 
             override fun lockInterruptibly() {
-                ensureNotLocked()
+                checkNotLocked()
                 origWriteLock.lockInterruptibly()
             }
         }
 
+        private val newReadLock = object: Lock{
+
+            override fun tryLock(): Boolean {
+                checkNotLocked()
+                val r =  origReadLock.tryLock()
+                if(r)
+                    readLockThreads.put(Thread.currentThread(), this)
+                return r
+            }
+
+            override fun tryLock(time: Long, unit: TimeUnit?): Boolean {
+                checkNotLocked()
+                val r = origReadLock.tryLock(time, unit)
+                if(r)
+                    readLockThreads.put(Thread.currentThread(), this)
+                return r
+            }
+
+            override fun newCondition(): Condition {
+                throw UnsupportedOperationException()
+            }
+
+            override fun lock() {
+                checkNotLocked()
+                readLockThreads.put(Thread.currentThread(), this)
+                origReadLock.lock()
+            }
+
+            override fun lockInterruptibly() {
+                checkNotLocked()
+                readLockThreads.put(Thread.currentThread(), this)
+                origReadLock.lockInterruptibly()
+            }
+
+            override fun unlock() {
+                readLockThreads.remove(Thread.currentThread())
+                origReadLock.unlock()
+            }
+        }
+
         override fun writeLock() = newWriteLock
+        override fun readLock() = newReadLock
+
     }
 
     class SingleEntryLock(val lock:ReentrantLock = ReentrantLock()): Lock by lock{
@@ -259,8 +339,27 @@ internal object Utils {
     fun lockReadAll(locks: Array<ReadWriteLock?>) {
         if(locks==null)
             return
-        for(lock in locks)
-            lock!!.readLock().lock()
+        while(true) {
+            var i = 0;
+            while(i<locks.size){
+                //try to lock all locks
+                val lock = locks[i++]?: continue
+
+                if(!lock.readLock().tryLock()){
+                    i--
+                    //could not lock, rollback all locks
+                    while(i>0){
+                        (locks[--i]?:continue).readLock().unlock()
+                    }
+
+                    Thread.sleep(0, 100*1000)
+                    //and try again to lock all
+                    i = 0
+                    continue
+                }
+            }
+            return //all locked fine
+        }
     }
 
     fun unlockReadAll(locks: Array<ReadWriteLock?>) {
@@ -274,9 +373,29 @@ internal object Utils {
     fun lockWriteAll(locks: Array<ReadWriteLock?>) {
         if(locks==null)
             return
-        for(lock in locks)
-            if(lock!=null)
-                lock.writeLock().lock()
+        while(true) {
+            var i = 0;
+            while(i<locks.size){
+                //try to lock all locks
+                val lock = locks[i++]?: continue
+
+                if(!lock.writeLock().tryLock()){
+                    i--
+                    //could not lock, rollback all locks
+                    while(i>0){
+                        (locks[--i]?:continue).writeLock().unlock()
+                    }
+
+                    Thread.sleep(0, 100*1000)
+                    //and try again to lock all
+                    i = 0
+                    continue
+                }
+
+
+            }
+            return //all locked fine
+        }
     }
 
     fun unlockWriteAll(locks: Array<ReadWriteLock?>) {
@@ -306,4 +425,46 @@ internal object Utils {
         }
     }
 
+
+    class SingleEntryReadWriteSegmentedLock(
+            segmentCount:Int
+    ){
+
+        private val locks = Array(segmentCount, {SingleEntryReadWriteLock()})
+
+        inline fun s(segment:Int) = segment % locks.size
+
+        inline fun l(segment:Int) = locks[s(segment)]
+
+        fun writeLock(segment:Int){
+            for(lock in locks)
+                lock.checkNotLocked()
+
+            l(segment).writeLock().lock()
+        }
+
+        fun writeUnlock(segment:Int){
+            l(segment).writeLock().unlock()
+        }
+
+        fun readLock(segment:Int){
+            for(lock in locks)
+                lock.checkNotLocked()
+
+            l(segment).readLock().lock()
+        }
+
+        fun readUnlock(segment:Int){
+            l(segment).readLock().unlock()
+        }
+
+        fun checkReadLocked(segment:Int){
+            l(segment).checkReadLocked()
+        }
+
+        fun checkWriteLocked(segment:Int){
+            l(segment).checkWriteLocked()
+        }
+
+    }
 }

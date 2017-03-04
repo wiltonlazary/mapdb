@@ -135,6 +135,8 @@ object DBMaker{
         private var _isThreadSafe = true
         private var _concurrencyScale: Int = 1.shl(CC.STORE_DIRECT_CONC_SHIFT)
         private var _cleanerHack = false
+        private var _classLoader = Thread.currentThread().contextClassLoader
+
         private var _fileMmapPreclearDisable = false
         private var _fileLockWait = 0L
         private var _fileMmapfIfSupported = false
@@ -155,6 +157,11 @@ object DBMaker{
 
         fun allocateIncrement(incrementSize:Long):Maker{
             _allocateIncrement = incrementSize;
+            return this
+        }
+
+        fun classLoader(classLoader:ClassLoader):Maker{
+            _classLoader = classLoader
             return this
         }
 
@@ -367,7 +374,7 @@ object DBMaker{
 
         /**
          * Enable FileChannel access. By default MapDB uses {@link java.io.RandomAccessFile}.
-         * whic is slower and more robust. but does not allow concurrent access (parallel read and writes). RAF is still thread-safe
+         * which is slower and more robust. but does not allow concurrent access (parallel read and writes). RAF is still thread-safe
          * but has global lock.
          * FileChannel does not have global lock, and is faster compared to RAF. However memory-mapped files are
          * probably best choice.
@@ -465,7 +472,7 @@ object DBMaker{
                                allocateIncrement = _allocateIncrement,
                                allocateStartSize = _allocateStartSize,
                                fileDeleteAfterClose = _fileDeleteAfterClose,
-                               fileDelteAfterOpen = _fileDeleteAfterOpen,
+                               fileDeleteAfterOpen = _fileDeleteAfterOpen,
                                concShift = concShift,
                                checksum = _checksumStoreEnable,
                                isThreadSafe = _isThreadSafe ,
@@ -473,7 +480,7 @@ object DBMaker{
                     }
                 }
 
-            return DB(store=store, storeOpened = storeOpened, isThreadSafe = _isThreadSafe, shutdownHook = _closeOnJvmShutdown)
+            return DB(store=store, storeOpened = storeOpened, isThreadSafe = _isThreadSafe, shutdownHook = _closeOnJvmShutdown, classLoader = _classLoader )
         }
     }
 

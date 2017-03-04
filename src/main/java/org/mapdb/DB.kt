@@ -9,6 +9,7 @@ import org.mapdb.elsa.*
 import org.mapdb.elsa.ElsaSerializerPojo.ClassInfo
 import org.mapdb.serializer.GroupSerializer
 import org.mapdb.serializer.GroupSerializerObjectArray
+import org.mapdb.serializer.GroupSerializerWrapper
 import org.mapdb.tuple.*
 import java.io.Closeable
 import java.io.DataInput
@@ -181,7 +182,7 @@ open class DB(
             IndexTreeList::class.java
     )
 
-    private val nameSer = object:ElsaSerializerBase.Ser<Any>(){
+    private val nameSer = object:ElsaSerializerBase.Serializer<Any>(){
         override fun serialize(out: DataOutput, value: Any, objectStack: ElsaStack?) {
             val name = getNameForObject(value)
                     ?: throw DBException.SerializationError("Could not serialize named object, it was not instantiated by this db")
@@ -190,7 +191,7 @@ open class DB(
         }
     }
 
-    private val nameDeser = object:ElsaSerializerBase.Deser<Any>(){
+    private val nameDeser = object:ElsaSerializerBase.Deserializer<Any>(){
         override fun deserialize(input: DataInput, objectStack: ElsaStack): Any? {
             val name = input.readUTF()
             return this@DB.get(name)
@@ -198,6 +199,7 @@ open class DB(
     }
 
     private val elsaSerializer:ElsaSerializerPojo = ElsaSerializerPojo(
+            classLoader,
             0,
             pojoSingletons(),
             //TODO add Tuples into default serializer
@@ -218,9 +220,10 @@ open class DB(
                 override fun getClassInfo(classId: Int): ElsaSerializerPojo.ClassInfo? {
                     return loadClassInfos()[classId]
                 }
-            } )
+            }
+            )
 
-    protected fun  <K> serializerForClass(clazz: Class<K>): GroupSerializer<K> {
+    protected fun  <K> serializerForClass(clazz: Class<K>): Serializer<K> {
         return when(clazz){
 
             Character.TYPE -> Serializer.CHAR
@@ -259,7 +262,7 @@ open class DB(
             Tuple6::class.java -> Tuple6Serializer<Any?,Any?,Any?,Any?,Any?,Any?>(defaultSerializer)
 
             else -> defaultSerializer
-        } as GroupSerializer<K>
+        } as Serializer<K>
     }
     /**
      * Default serializer used if collection does not specify specialized serializer.
@@ -276,9 +279,6 @@ open class DB(
         }
 
     }
-
-    //fun <E> getDefaultSerializer() = defaultSerializer as GroupSerializer<E>
-
 
     protected val classInfoSerializer = object : Serializer<Array<ClassInfo>> {
 
@@ -1108,7 +1108,8 @@ open class DB(
 
         protected var _keySerializer:GroupSerializer<K> = db.defaultSerializer as GroupSerializer<K>
          protected var _valueSerializer:GroupSerializer<V> =
-                 (if(hasValues) db.defaultSerializer else BTreeMap.NO_VAL_SERIALIZER) as GroupSerializer<V>
+                 GroupSerializerWrapper.wrap(if(hasValues) db.defaultSerializer else BTreeMap.NO_VAL_SERIALIZER)
+
          protected var _maxNodeSize = CC.BTREEMAP_MAX_NODE_SIZE
          protected var _counterEnable: Boolean = false
          protected var _valueLoader:((key:K)->V)? = null
@@ -1205,15 +1206,15 @@ open class DB(
             name:String
     ):BTreeMapMaker<K,V,BTreeMap<K,V>>(db,name,hasValues=true){
 
-        fun <A> keySerializer(keySerializer:GroupSerializer<A>):TreeMapMaker<A,V>{
-            _keySerializer = keySerializer as GroupSerializer<K>
+        fun <A> keySerializer(keySerializer:Serializer<A>):TreeMapMaker<A,V>{
+            _keySerializer = GroupSerializerWrapper.wrap(keySerializer)
             return this as TreeMapMaker<A, V>
         }
 
-        fun <A> valueSerializer(valueSerializer:GroupSerializer<A>):TreeMapMaker<K,A>{
+        fun <A> valueSerializer(valueSerializer:Serializer<A>):TreeMapMaker<K,A>{
             if(!hasValues)
                 throw DBException.WrongConfiguration("Set, no vals")
-            _valueSerializer = valueSerializer as GroupSerializer<V>
+            _valueSerializer = GroupSerializerWrapper.wrap(valueSerializer)
             return this as TreeMapMaker<K, A>
         }
 //
@@ -1309,8 +1310,8 @@ open class DB(
     ) :BTreeMapMaker<E, Boolean, NavigableSet<E>>(db,name,hasValues=false){
 
 
-        fun <A> serializer(serializer:GroupSerializer<A>):TreeSetMaker<A>{
-            this._keySerializer = serializer as GroupSerializer<E>
+        fun <A> serializer(serializer:Serializer<A>):TreeSetMaker<A>{
+            this._keySerializer = GroupSerializerWrapper.wrap(serializer)
             return this as TreeSetMaker<A>
         }
 
@@ -1374,7 +1375,7 @@ open class DB(
     }
 
     fun treeMap(name:String):TreeMapMaker<Any?,Any?> = TreeMapMaker<Any?, Any?>(this, name)
-    fun <K,V> treeMap(name:String, keySerializer: GroupSerializer<K>, valueSerializer: GroupSerializer<V>) =
+    fun <K,V> treeMap(name:String, keySerializer: Serializer<K>, valueSerializer: Serializer<V>) =
             TreeMapMaker<K,V>(this, name)
                     .keySerializer(keySerializer)
                     .valueSerializer(valueSerializer)
@@ -1386,7 +1387,7 @@ open class DB(
 
     fun treeSet(name:String):TreeSetMaker<Any?> = TreeSetMaker<Any?>(this, name)
 
-    fun <E> treeSet(name:String, serializer: GroupSerializer<E>) =
+    fun <E> treeSet(name:String, serializer: Serializer<E>) =
             TreeSetMaker<E>(this, name)
                     .serializer(serializer)
 
@@ -1895,7 +1896,7 @@ open class DB(
             return //class is already present
         //add as last item to an array
         infos = Arrays.copyOf(infos, infos.size + 1)
-        infos[infos.size - 1] = ElsaSerializerPojo.makeClassInfo(clazz)
+        infos[infos.size - 1] = ElsaSerializerPojo.makeClassInfo(clazz, classLoader)
         //and save
         store2.update(CC.RECID_CLASS_INFOS, infos, classInfoSerializer)
     }

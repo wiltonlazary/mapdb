@@ -37,7 +37,7 @@ abstract class StoreDirectAbstract(
     protected val volumeExistsAtStart = volumeFactory.exists(file)
 
     //TODO PERF indexPages are synchronized writes are protected by structural lock, but should it be read under locks?
-    protected val indexPages = if(isThreadSafe) LongArrayList().asSynchronized() else LongArrayList()
+    protected val indexPages = if(isThreadSafe) ThreadSafeLongArrayList() else LongArrayList()
 
     protected fun recidToOffset(recid2:Long):Long{
         var recid = recid2-1; //normalize recid so it starts from zero
@@ -105,11 +105,11 @@ abstract class StoreDirectAbstract(
         }
 
         if(headVol.getInt(20)!=calculateHeaderChecksum()) {
-            val msg = "Header checksum broken. Store was not closed correctly and might be corrupted. Use `DBMaker.checksumHeaderBypass()` to recover your data. Use clean shutdown or enable transactions to protect the store in the future.";
+            val msg = "Header checksum broken. Store was not closed correctly and might be corrupted."
             if(checksumHeaderBypass)
-                Utils.LOG.warning{msg}
+                Utils.LOG.warning{msg+". Check was bypassed with `DBMaker.checksumHeaderBypass()`. Recover your data!"}
             else
-                throw DBException.DataCorruption(msg)
+                throw DBException.BrokenHeaderChecksum(msg+" Use `DBMaker.checksumHeaderBypass()` to recover your data. Use clean shutdown or enable transactions to protect the store in the future.")
         }
 
         if(header.toInt().ushr(CC.FEAT_ENCRYPT_SHIFT) and CC.FEAT_ENCRYPT_MASK!=0)
