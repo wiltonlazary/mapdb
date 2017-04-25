@@ -1,3 +1,5 @@
+@file:Suppress("CAST_NEVER_SUCCEEDS")
+
 package org.mapdb.StoreAccess
 
 import org.eclipse.collections.api.list.primitive.MutableLongList
@@ -9,7 +11,6 @@ import org.mapdb.*
 import org.mapdb.volume.SingleByteArrayVol
 import org.mapdb.volume.Volume
 import java.util.concurrent.locks.Lock
-import java.util.concurrent.locks.ReadWriteLock
 
 
 val StoreDirectAbstract.maxRecid: Long
@@ -28,8 +29,8 @@ val StoreDirectAbstract.structuralLock: Lock?
     get() = Reflection.method("getStructuralLock").`in`(this).invoke() as Lock?
 
 
-val StoreDirectAbstract.locks: Array<ReadWriteLock?>
-    get() = Reflection.method("getLocks").`in`(this).invoke() as Array<ReadWriteLock?>
+val StoreDirectAbstract.locks: Utils.SingleEntryReadWriteSegmentedLock?
+    get() = Reflection.method("getLocks").`in`(this).invoke() as Utils.SingleEntryReadWriteSegmentedLock?
 
 fun StoreDirectAbstract.indexValCompose(size: Long,
                                         offset: Long,

@@ -1,3 +1,5 @@
+@file:Suppress("CAST_NEVER_SUCCEEDS")
+
 package org.mapdb
 
 import org.fest.reflect.core.Reflection
@@ -9,15 +11,14 @@ import java.io.Serializable
 import java.util.*
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.locks.ReadWriteLock
 
 class HTreeMapTest{
 
     val HTreeMap<*,*>.leafSerializer: Serializer<Array<Any>>
         get() = Reflection.method("getLeafSerializer").`in`(this).invoke() as Serializer<Array<Any>>
 
-    val HTreeMap<*,*>.locks:  Array<ReadWriteLock?>
-        get() = Reflection.method("getLocks").`in`(this).invoke() as  Array<ReadWriteLock?>
+    val HTreeMap<*,*>.locks:  Utils.SingleEntryReadWriteSegmentedLock?
+        get() = Reflection.method("getLocks").`in`(this).invoke() as  Utils.SingleEntryReadWriteSegmentedLock?
 
 
     fun HTreeMap<*,*>.hashToSegment(h: Int): Int =
@@ -35,6 +36,7 @@ class HTreeMapTest{
 
 
     @Test fun hashAssertion(){
+        @Suppress("UNCHECKED_CAST")
         val map = HTreeMap.make<ByteArray,Int>(keySerializer = Serializer.ELSA as Serializer<ByteArray>)
 
         try {
@@ -208,7 +210,7 @@ class HTreeMapTest{
 
         i = 0
         while (i < 1e5){
-            assertEquals(i, m.get(intArrayOf(i!!, i, i)))
+            assertEquals(i, m.get(intArrayOf(i, i, i)))
             i++
         }
 
@@ -221,16 +223,16 @@ class HTreeMapTest{
         var m:HTreeMap<String,String>? = null
         var seg:Int? = null
         m = db.hashMap("name", Serializer.STRING, Serializer.STRING)
-            .modificationListener(MapModificationListener { key, oldVal, newVal, triggered ->
-                for (i in 0..m!!.locks!!.size - 1) {
+            .modificationListener(MapModificationListener { _, _, _, _ ->
+                for (i in 0..m!!.locks!!.segmentCount - 1) {
                     assertEquals(seg == i,
-                            (m!!.locks[i] as Utils.SingleEntryReadWriteLock).lock.isWriteLockedByCurrentThread)
+                            m!!.locks!!.isWriteLockedByCurrentThread(i))
                 }
                 counter.incrementAndGet()
             })
             .create()
 
-        seg = m!!.hashToSegment(m!!.hash("aa"))
+        seg = m.hashToSegment(m.hash("aa"))
 
         m.put("aa", "aa")
         m.put("aa", "bb")
@@ -245,34 +247,33 @@ class HTreeMapTest{
         assertEquals(8, counter.get().toLong())
     }
 
-// TODO HashSet not implemented yet
-//    @Test
-//    fun test_iterate_and_remove() {
-//        val max = 1e5.toLong()
-//
-//        val m = DBMaker.memoryDB().make().hashSet("test")
-//
-//        for (i in 0..max - 1) {
-//            m.add(i)
-//        }
-//
-//
-//        val control = HashSet()
-//        val iter = m.iterator()
-//
-//        for (i in 0..max / 2 - 1) {
-//            assertTrue(iter.hasNext())
-//            control.add(iter.next())
-//        }
-//
-//        m.clear()
-//
-//        while (iter.hasNext()) {
-//            control.add(iter.next())
-//        }
-//
-//    }
-//
+    @Test
+    fun test_iterate_and_remove() {
+        val max = 1e5.toInt()
+
+        val m = DBMaker.memoryDB().make().hashSet("test", Serializer.INTEGER).create()
+
+        for (i in 0..max - 1) {
+            m.add(i)
+        }
+
+
+        val control = HashSet<Int?>()
+        val iter = m.iterator()
+
+        for (i in 0..max / 2 - 1) {
+            assertTrue(iter.hasNext())
+            control.add(iter.next())
+        }
+
+        m.clear()
+
+        while (iter.hasNext()) {
+            control.add(iter.next())
+        }
+
+    }
+
     /*
         Hi jan,
 
@@ -336,8 +337,8 @@ class HTreeMapTest{
 
     class AA(internal val vv: Int) : Serializable {
 
-        override fun equals(obj: Any?): Boolean {
-            return obj is AA && obj.vv == vv
+        override fun equals(other: Any?): Boolean {
+            return other is AA && other.vv == vv
         }
     }
 
@@ -387,7 +388,7 @@ class HTreeMapTest{
                 .modificationListener(object : MapModificationListener<String,String> {
                     override fun modify(key: String, oldValue: String?, newValue: String?, triggered: Boolean) {
                         val segment = m!!.hashToSegment(m!!.hash(key))
-                        Utils.assertWriteLock(m!!.locks[segment])
+                        m!!.locks!!.checkWriteLocked(segment)
                         counter.incrementAndGet()
                     }
                 })
@@ -414,22 +415,57 @@ class HTreeMapTest{
         assertEquals(1000, size)
     }
 
-//  TODO this code causes Kotlin compiler to crash. Reenable once issue is solved https://youtrack.jetbrains.com/issue/KT-14025
-//
-//    @Test fun calculateCollisions2(){
-//        val ser2 = object: Serializer<Long> by Serializer.LONG{
-//            override fun hashCode(a: Long, seed: Int): Int {
-//                return 0
-//            }
-//        }
-//
-//        val map = DBMaker.heapDB().make().hashMap("name", ser2, Serializer.LONG).createOrOpen()
-//        for(i in 0L until 1000)
-//            map[i] = i
-//        val (collision, size) = map.calculateCollisionSize()
-//        assertEquals(999, collision)
-//        assertEquals(1000, size)
-//    }
-//
+    @Test fun calculateCollisions2(){
+        val ser2 = object: Serializer<Long> by Serializer.LONG{
+            override fun hashCode(a: Long, seed: Int): Int {
+                return 0
+            }
+        }
+
+        val map = DBMaker.heapDB().make().hashMap("name", ser2, Serializer.LONG).createOrOpen()
+        for(i in 0L until 1000)
+            map[i] = i
+        val (collision, size) = map.calculateCollisionSize()
+        assertEquals(999, collision)
+        assertEquals(1000, size)
+    }
+
+    @Test fun key_iterator_does_not_deserialize_external_values(){
+        var keyDeserCount = 0
+        var stopValDeser = false
+
+        val keyser = object: Serializer<Int> by Serializer.INTEGER{
+            override fun deserialize(input: DataInput2, available: Int): Int {
+                keyDeserCount++
+                return input.readInt()
+            }
+        }
+
+
+        val valser = object: Serializer<Int> by Serializer.INTEGER{
+            override fun deserialize(input: DataInput2, available: Int): Int {
+                assert(!stopValDeser)
+                return input.readInt()
+            }
+        }
+
+        val map = DBMaker
+                .memoryDB()
+                .make()
+                .hashMap("test",keyser, valser)
+                .create()
+        for(i in 0 until 10000) {
+            map.put(i, i)
+        }
+
+        keyDeserCount=0
+        stopValDeser = true
+        for(k in map.keys){
+        }
+        assertEquals(10000, keyDeserCount )
+    }
+
+
+
 
 }

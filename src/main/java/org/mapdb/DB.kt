@@ -224,8 +224,7 @@ open class DB(
             )
 
     protected fun  <K> serializerForClass(clazz: Class<K>): Serializer<K> {
-        return when(clazz){
-
+        val v = when(clazz){
             Character.TYPE -> Serializer.CHAR
             Char::class.java -> Serializer.CHAR
             String::class.java -> Serializer.STRING
@@ -262,7 +261,10 @@ open class DB(
             Tuple6::class.java -> Tuple6Serializer<Any?,Any?,Any?,Any?,Any?,Any?>(defaultSerializer)
 
             else -> defaultSerializer
-        } as Serializer<K>
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        return v as Serializer<K>
     }
     /**
      * Default serializer used if collection does not specify specialized serializer.
@@ -314,7 +316,7 @@ open class DB(
 
             for(recid in 3L..CC.RECID_MAX_RESERVED){
                 val recid2 = store.put(null, Serializer.LONG_PACKED)
-                if(recid!==recid2){
+                if(recid!=recid2){
                     throw DBException.WrongConfiguration("Store does not support Reserved Recids: "+store.javaClass)
                 }
             }
@@ -457,11 +459,9 @@ open class DB(
         val clazz = nameCatalog.get(key)
                 ?: return null
 
-        val singleton = classSingletonRev.get(clazz)
-        if(singleton!=null)
-            return singleton as E
-
-        throw DBException.WrongConfiguration("Could not load object: "+clazz)
+        @Suppress("UNCHECKED_CAST")
+        val singleton = classSingletonRev.get(clazz) as E?
+        return singleton ?: throw DBException.WrongConfiguration("Could not load object: "+clazz)
     }
 
     fun nameCatalogParamsFor(name: String): Map<String,String> {
@@ -533,7 +533,7 @@ open class DB(
         Utils.lockWrite(lock) {
             checkNotClosed()
             val type = nameCatalogGet(name + Keys.type)
-            return when (type) {
+            val ret:Any? = when (type) {
                 "HashMap" -> hashMap(name).open()
                 "HashSet" -> hashSet(name).open()
                 "TreeMap" -> treeMap(name).open()
@@ -550,7 +550,9 @@ open class DB(
 
                 null -> null
                 else -> DBException.WrongConfiguration("Collection has unknown type: "+type)
-            } as E
+            }
+            @Suppress("UNCHECKED_CAST")
+            return ret as E
         }
     }
 
@@ -599,9 +601,7 @@ open class DB(
                 is MutableCollection<*> -> obj.clear()
                 is MutableMap<*, *> -> obj.clear()
                 is MutableLongValuesMap -> obj.clear()
-
-                null -> null
-                else -> DBException.WrongConfiguration("Collection has unknown class: " + obj.javaClass)
+                else -> throw DBException.WrongConfiguration("Collection has unknown class: " + obj.javaClass)
             }
 
             //remove all parameters
@@ -654,11 +654,13 @@ open class DB(
             db:DB,
             name:String,
             protected val hasValues:Boolean=true,
-            protected val _storeFactory:(segment:Int)->Store = {i-> db.store}
+            protected val _storeFactory:(segment:Int)->Store = {_-> db.store}
     ):Maker<MAP>(db,name, if(hasValues) "HashMap" else "HashSet"){
         override fun awareItems() = arrayOf(_keySerializer, _valueSerializer, _valueLoader)
 
+        @Suppress("UNCHECKED_CAST")
         protected var _keySerializer:Serializer<K> = db.defaultSerializer as Serializer<K>
+        @Suppress("UNCHECKED_CAST")
         protected var _valueSerializer:Serializer<V> = db.defaultSerializer as Serializer<V>
         protected var _valueInline = false
 
@@ -698,7 +700,7 @@ open class DB(
                     if (!triggered && newVal == null && oldVal != null) {
                         //removal, also remove from overflow map
                         val oldVal2 = expireOverflow.remove(key)
-                        if (oldVal2 != null && _valueSerializer.equals(oldVal as V, oldVal2 as V)) {
+                        if (oldVal2 != null && _valueSerializer.equals(oldVal, oldVal2)) {
                             Utils.LOG.warning { "Key also removed from overflow Map, but value in overflow Map differs" }
                         }
                     } else if (triggered && newVal == null) {
@@ -827,20 +829,32 @@ open class DB(
                     closeable = db,
                     hasValues = hasValues
             )
-            return (if(hasValues)ret else ret.keys) as MAP
+
+            if(hasValues)
+                @Suppress("UNCHECKED_CAST")
+                return ret as MAP
+            else
+                @Suppress("UNCHECKED_CAST")
+                return ret.keys as MAP
         }
 
         override fun open2(catalog: SortedMap<String, String>): MAP {
+            //TODO open2() methods should use `poisoned` local values, to make sure that all values are initialized from Name Catalog, not from default values. See stupid typo in #819
+            _concShift = catalog[name + Keys.concShift]!!.toInt()
+
             val segmentCount = 1.shl(_concShift)
             val stores = Array(segmentCount, _storeFactory)
 
             _keySerializer =
                     db.nameCatalogGetClass(catalog, name + if(hasValues)Keys.keySerializer else Keys.serializer)
                             ?: _keySerializer
-            _valueSerializer = if(!hasValues) BTreeMap.NO_VAL_SERIALIZER as Serializer<V>
-            else {
-                db.nameCatalogGetClass(catalog, name + Keys.valueSerializer)?: _valueSerializer
-            }
+            _valueSerializer =
+                    if(!hasValues){
+                        @Suppress("UNCHECKED_CAST")
+                        BTreeMap.NO_VAL_SERIALIZER as Serializer<V>
+                    }else {
+                        db.nameCatalogGetClass(catalog, name + Keys.valueSerializer)?: _valueSerializer
+                    }
             _valueInline = if(hasValues) catalog[name + Keys.valueInline]!!.toBoolean() else true
 
             val hashSeed = catalog[name + Keys.hashSeed]!!.toInt()
@@ -850,7 +864,6 @@ open class DB(
                     if ("" == counterRecidsStr) null
                     else counterRecidsStr.split(",").map { it.toLong() }.toLongArray()
 
-            _concShift = catalog[name + Keys.concShift]!!.toInt()
             _dirShift = catalog[name + Keys.dirShift]!!.toInt()
             _levels = catalog[name + Keys.levels]!!.toInt()
             _removeCollapsesIndexTree = catalog[name + Keys.removeCollapsesIndexTree]!!.toBoolean()
@@ -915,7 +928,14 @@ open class DB(
                     closeable = db,
                     hasValues = hasValues
             )
-            return (if(hasValues)ret else ret.keys) as MAP
+
+
+            if(hasValues)
+                @Suppress("UNCHECKED_CAST")
+                return ret as MAP
+            else
+                @Suppress("UNCHECKED_CAST")
+                return ret.keys as MAP
         }
 
     }
@@ -924,16 +944,20 @@ open class DB(
     class HashMapMaker<K,V>(
         db:DB,
         name:String,
-        storeFactory:(segment:Int)->Store = {i-> db.store}
+        storeFactory:(segment:Int)->Store = {_-> db.store}
     ):HTreeMapMaker<K,V,HTreeMap<K,V>>(db,name,true,storeFactory){
 
         fun <A> keySerializer(keySerializer:Serializer<A>):HashMapMaker<A,V>{
+            @Suppress("UNCHECKED_CAST")
             _keySerializer = keySerializer as Serializer<K>
+            @Suppress("UNCHECKED_CAST")
             return this as HashMapMaker<A, V>
         }
 
         fun <A> valueSerializer(valueSerializer:Serializer<A>):HashMapMaker<K,A>{
+            @Suppress("UNCHECKED_CAST")
             _valueSerializer = valueSerializer as Serializer<V>
+            @Suppress("UNCHECKED_CAST")
             return this as HashMapMaker<K, A>
         }
 
@@ -1053,9 +1077,7 @@ open class DB(
 
 
         fun modificationListener(listener:MapModificationListener<K,V>):HashMapMaker<K,V>{
-            if(_modListeners==null)
-                _modListeners = ArrayList()
-            _modListeners?.add(listener)
+            _modListeners.add(listener)
             return this;
         }
 
@@ -1103,10 +1125,10 @@ open class DB(
              protected val hasValues:Boolean
          ) :Maker<MAP>(db,name, if(hasValues)"TreeMap" else "TreeSet"){
 
-        override fun awareItems() = arrayOf(_keySerializer, _valueSerializer, _valueLoader)
+         override fun awareItems() = arrayOf(_keySerializer, _valueSerializer, _valueLoader)
 
-
-        protected var _keySerializer:GroupSerializer<K> = db.defaultSerializer as GroupSerializer<K>
+         @Suppress("UNCHECKED_CAST")
+         protected var _keySerializer:GroupSerializer<K> = db.defaultSerializer as GroupSerializer<K>
          protected var _valueSerializer:GroupSerializer<V> =
                  GroupSerializerWrapper.wrap(if(hasValues) db.defaultSerializer else BTreeMap.NO_VAL_SERIALIZER)
 
@@ -1153,7 +1175,12 @@ open class DB(
                      modificationListeners = if(_modListeners==null) null else _modListeners!!.toTypedArray()
              )
 
-             return (if(hasValues) ret else ret.keys) as MAP
+             if(hasValues)
+                 @Suppress("UNCHECKED_CAST")
+                 return ret as MAP
+             else
+                 @Suppress("UNCHECKED_CAST")
+                 return ret.keys as MAP
          }
 
          override fun open2(catalog: SortedMap<String, String>): MAP {
@@ -1165,6 +1192,7 @@ open class DB(
                              ?: _keySerializer
              _valueSerializer =
                      if(!hasValues) {
+                         @Suppress("UNCHECKED_CAST")
                          BTreeMap.NO_VAL_SERIALIZER as GroupSerializer<V>
                      }else {
                          db.nameCatalogGetClass(catalog, name + Keys.valueSerializer) ?: _valueSerializer
@@ -1196,7 +1224,12 @@ open class DB(
                      valueInline = _valueInline,
                      modificationListeners = if(_modListeners==null)null else _modListeners!!.toTypedArray()
              )
-             return (if(hasValues) ret else ret.keys) as MAP
+             if(hasValues)
+                 @Suppress("UNCHECKED_CAST")
+                 return ret as MAP
+             else
+                 @Suppress("UNCHECKED_CAST")
+                 return ret.keys as MAP
          }
 
      }
@@ -1208,6 +1241,7 @@ open class DB(
 
         fun <A> keySerializer(keySerializer:Serializer<A>):TreeMapMaker<A,V>{
             _keySerializer = GroupSerializerWrapper.wrap(keySerializer)
+            @Suppress("UNCHECKED_CAST")
             return this as TreeMapMaker<A, V>
         }
 
@@ -1215,6 +1249,7 @@ open class DB(
             if(!hasValues)
                 throw DBException.WrongConfiguration("Set, no vals")
             _valueSerializer = GroupSerializerWrapper.wrap(valueSerializer)
+            @Suppress("UNCHECKED_CAST")
             return this as TreeMapMaker<K, A>
         }
 //
@@ -1312,6 +1347,7 @@ open class DB(
 
         fun <A> serializer(serializer:Serializer<A>):TreeSetMaker<A>{
             this._keySerializer = GroupSerializerWrapper.wrap(serializer)
+            @Suppress("UNCHECKED_CAST")
             return this as TreeSetMaker<A>
         }
 
@@ -1399,16 +1435,19 @@ open class DB(
     class HashSetMaker<E>(
             db:DB,
             name:String,
-            storeFactory:(segment:Int)->Store = {i-> db.store}
+            storeFactory:(segment:Int)->Store = {_-> db.store}
     ) :HTreeMapMaker<E, Void, HTreeMap.KeySet<E>>(db,name, false, storeFactory){
 
         init{
+            @Suppress("UNCHECKED_CAST")
             _valueSerializer = BTreeMap.NO_VAL_SERIALIZER as Serializer<Void>
             _valueInline =true
         }
 
         fun <A> serializer(serializer:Serializer<A>):HashSetMaker<A>{
+            @Suppress("UNCHECKED_CAST")
             _keySerializer = serializer as Serializer<E>
+            @Suppress("UNCHECKED_CAST")
             return this as HashSetMaker<A>
         }
 
@@ -1558,8 +1597,10 @@ open class DB(
                 }
 
                 val ref = db.namesInstanciated.getIfPresent(name)
-                if(ref!=null)
+                if(ref!=null) {
+                    @Suppress("UNCHECKED_CAST")
                     return ref as E;
+                }
 
                 if(typeFromDb!=null) {
                     val ret = open2(catalog)
@@ -1695,6 +1736,7 @@ open class DB(
 
     class AtomicVarMaker<E>(db:DB,
                             name:String,
+                            @Suppress("UNCHECKED_CAST")
                             protected val serializer:Serializer<E> = db.defaultSerializer as Serializer<E>,
                             protected val value:E? = null):Maker<Atomic.Var<E>>(db,name, "AtomicVar"){
 
@@ -1905,7 +1947,7 @@ open class DB(
 
     private fun nameCatalogVerifyTree():Map<String, Map<String, CatVal>> {
 
-        val all = {s:String->null}
+        val all = {_:String->null}
         val recid = {s:String->
             try{
                 val l = s.toLong()

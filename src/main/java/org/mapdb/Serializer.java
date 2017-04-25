@@ -34,6 +34,7 @@ import java.util.*;
  *
  * @author Jan Kotek
  */
+//TODO annotate static serializers as non nullable
 public interface Serializer<A /*extends Comparable<? super A>*/> extends Comparator<A> {
 
     /**
@@ -633,6 +634,16 @@ public interface Serializer<A /*extends Comparable<? super A>*/> extends Compara
         serialize(out, value);
         DataInput2 in2 = new DataInput2.ByteArray(out.copyBytes());
         return deserialize(in2, out.pos);
+    }
+
+    /**
+     * Return true if serializer only reads from stream, without doing anything else.
+     * If thats case, MapDB can make some optimalizations
+     *
+     * @return true if serializer is self contained, and does not call anything else
+     */
+    default boolean isQuick(){
+        return false;
     }
 
 //

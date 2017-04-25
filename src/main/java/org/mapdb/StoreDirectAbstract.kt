@@ -9,7 +9,6 @@ import org.mapdb.volume.Volume
 import org.mapdb.volume.VolumeFactory
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.locks.ReadWriteLock
 
 /**
  * Common utils for StoreDirect, StoreWAL and StoreCached
@@ -30,7 +29,7 @@ abstract class StoreDirectAbstract(
 
     protected val segmentCount = 1.shl(concShift)
     protected val segmentMask = 1L.shl(concShift)-1
-    protected val locks:Array<ReadWriteLock?> = Array(segmentCount, {Utils.newReadWriteLock(isThreadSafe)})
+    protected val locks = Utils.newReadWriteSegmentedLock(isThreadSafe, segmentCount)
     protected val structuralLock = Utils.newLock(isThreadSafe)
     protected val compactionLock = Utils.newReadWriteLock(isThreadSafe)
 
@@ -223,7 +222,9 @@ abstract class StoreDirectAbstract(
         return (recid and segmentMask).toInt()
     }
 
-    protected fun <R> deserialize(serializer: Serializer<R>, di: DataInput2, size: Long): R? {
+    protected fun <R> deserialize(serializer: Serializer<R>, di: DataInput2, size: Long, recid:Long): R? {
+        assert(serializer.isQuick() || di is DataInput2.ByteArray)
+        assert(serializer.isQuick() || locks==null || recid<0 || !locks.isReadLockedByCurrentThread(recidToSegment(recid)))
         try{
             val ret = serializer.deserialize(di, size.toInt());
             return ret
@@ -234,9 +235,10 @@ abstract class StoreDirectAbstract(
         }
     }
 
-    protected fun <R> serialize(record: R?, serializer:Serializer<R>):DataOutput2?{
+    protected fun <R> serialize(record: R?, serializer:Serializer<R>, recid:Long):DataOutput2?{
         if(record == null)
             return null;
+        assert(serializer.isQuick() || locks==null || recid<0 || !locks.isReadLockedByCurrentThread(recidToSegment(recid)))
         try {
             val out = DataOutput2()
             serializer.serialize(out, record);
@@ -291,14 +293,14 @@ abstract class StoreDirectAbstract(
         val reusedDataOffset = if(recursive) 0L else
             longStackTake(longStackMasterLinkOffset(size.toLong()), recursive)
         if(reusedDataOffset!=0L){
-            val reusedDataOffset = parity1Get(reusedDataOffset).shl(3)
+            val reusedDataOffset2 = parity1Get(reusedDataOffset).shl(3)
             if(CC.ZEROS)
-                volume.assertZeroes(reusedDataOffset, reusedDataOffset+size)
-            if(CC.ASSERT && reusedDataOffset%16!=0L)
+                volume.assertZeroes(reusedDataOffset2, reusedDataOffset2+size)
+            if(CC.ASSERT && reusedDataOffset2%16!=0L)
                 throw DBException.DataCorruption("wrong offset")
 
             freeSizeIncrement(-size.toLong())
-            return reusedDataOffset
+            return reusedDataOffset2
         }
 
         val dataTail2 = dataTail;
@@ -362,8 +364,8 @@ abstract class StoreDirectAbstract(
         freeSizeIncrement(size)
 
         //offset is multiple of 16, 4 bits are unnecessary, save 3 bits, use 1 bit for parity
-        val offset = parity1Set(offset.ushr(3))
-        longStackPut(longStackMasterLinkOffset(size), offset, recursive);
+        val offset2 = parity1Set(offset.ushr(3))
+        longStackPut(longStackMasterLinkOffset(size), offset2, recursive);
     }
 
     protected fun releaseRecid(recid:Long){
