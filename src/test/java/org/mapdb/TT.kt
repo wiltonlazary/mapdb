@@ -2,6 +2,10 @@ package org.mapdb
 
 import org.junit.Assert.*
 import org.junit.Test
+import org.mapdb.io.*
+import org.mapdb.serializer.Serializer
+import org.mapdb.serializer.Serializers
+import org.mapdb.store.MutableStore
 import java.io.*
 import java.util.*
 import java.util.concurrent.*
@@ -26,13 +30,13 @@ object TT{
         return ret
     }
 
-    @JvmStatic fun randomFillStore(store:Store, size:Int=1000, seed:Long=Random().nextLong()){
+    @JvmStatic fun randomFillStore(store: MutableStore, size:Int=1000, seed:Long=Random().nextLong()){
         val random = Random(seed)
         for(i in 0..size){
             val bytes = randomByteArray(random.nextInt(100),seed=random.nextInt());
             store.put(
                     bytes,
-                    Serializer.BYTE_ARRAY_NOSIZE);
+                    Serializers.BYTE_ARRAY_NOSIZE);
         }
     }
 
@@ -53,21 +57,18 @@ object TT{
      * Create temporary file in temp folder. All associated db files will be deleted on JVM exit.
      */
     @JvmStatic fun tempFile(): File {
-        try {
-            val stackTrace = Thread.currentThread().stackTrace;
-            val elem = stackTrace[2];
-            val prefix = "mapdbTest_"+elem.className+"#"+elem.methodName+":"+elem.lineNumber+"_"
-            while(true){
-                val file = File(tempDir+"/"+prefix+System.currentTimeMillis()+"_"+Math.random());
-                if(file.exists().not()) {
-                    file.deleteOnExit()
-                    return file
-                }
-            }
-        } catch (e: IOException) {
-            throw IOError(e)
-        }
+        fun sanitize(name:String) = java.lang.String(name).replaceAll("[^a-zA-Z0-9_\\.]+","")
 
+        val stackTrace = Thread.currentThread().stackTrace;
+        val elem = stackTrace[2];
+        val prefix = "mapdbTest_"+sanitize(elem.className)+"-"+sanitize(elem.methodName)+"-"+elem.lineNumber+"_"
+        while(true){
+            val file = File(tempDir+File.separator+prefix+System.currentTimeMillis()+"_"+Math.random());
+            if(file.exists().not()) {
+                file.deleteOnExit()
+                return file
+            }
+        }
     }
 
     @JvmStatic fun tempDir(): File {
@@ -95,11 +96,11 @@ object TT{
 
 
     object Serializer_ILLEGAL_ACCESS: Serializer<Any> {
-        override fun serialize(out: DataOutput2, value: Any) {
+        override fun serialize(value: Any, out: DataOutput2) {
             throw AssertionError("Should not access this serializer")
         }
 
-        override fun deserialize(dataIn: DataInput2, available: Int): Any {
+        override fun deserialize(dataIn: DataInput2): Any {
             throw AssertionError("Should not access this serializer")
         }
 
@@ -131,12 +132,11 @@ object TT{
     }
 
     /* clone value using serialization */
-    @JvmStatic fun <E> clone(value: E, serializer: Serializer<*>, out:DataOutput2 = DataOutput2()): E {
-        out.pos = 0
+    @JvmStatic fun <E> clone(value: E, serializer: Serializer<*>, out:DataOutput2 = DataOutput2ByteArray()): E {
         @Suppress("UNCHECKED_CAST")
-        (serializer as Serializer<E>).serialize(out, value)
-        val in2 = DataInput2.ByteArray(out.copyBytes())
-        return serializer.deserialize(in2, out.pos)
+        (serializer as Serializer<E>).serialize(value, out)
+        val in2 = DataInput2ByteArray(out.copyBytes())
+        return serializer.deserialize(in2)
     }
 
     /* clone value using java serialization */
@@ -151,16 +151,12 @@ object TT{
         return ObjectInputStream(in2).readObject() as E
     }
 
-    @JvmStatic fun <E> serializedSize(value: E, serializer: Serializer<*>, out:DataOutput2 = DataOutput2()): Int {
-        out.pos = 0
+    @JvmStatic fun <E> serializedSize(value: E, serializer: Serializer<*>, out:DataOutput2 = DataOutput2ByteArray()): Int {
         @Suppress("UNCHECKED_CAST")
-        (serializer as Serializer<E>).serialize(out, value)
-        return out.pos;
+        (serializer as Serializer<E>).serialize(value, out)
+        return out.copyBytes().size;
     }
 
-    fun <T : Any> forkJvm(clazz:Class<T>, vararg args : String): Process {
-        return JavaProcess.exec(clazz, args)
-    }
 
     fun fork(count:Int=1, body:(i:Int)->Unit){
         val finish = async(count=count, body=body)
@@ -245,10 +241,30 @@ object TT{
         }
     }
 
-    fun <T : Throwable> assertFailsWith(exceptionClass: Class<T>, block: () -> Unit) {
+
+    fun <E> reflectionInvokeMethod(obj:Any, name:String, clazz:Class<*> = obj.javaClass):E{
+        val method = clazz.getDeclaredMethod(name)
+        method.isAccessible = true
+        return method.invoke(obj) as E
+    }
+
+
+    fun <E> reflectionGetField(obj:Any, name:String, clazz:Class<*> = obj.javaClass):E{
+        val field = clazz.getDeclaredField(name)
+        field.isAccessible = true
+        return field.get(obj) as E
+    }
+
+    /**
+     * Catches expected exception, rethrows everything else.
+     *
+     * Compared to [kotlin.test.assertFailsWith] does not swallow wrong exceptions, better for debuging
+     *
+     */
+    inline fun <T : Throwable> assertFailsWith(exceptionClass: kotlin.reflect.KClass<T>, block: () -> Unit) {
         try {
             block()
-            fail("Expected exception ${exceptionClass.name}")
+            fail("Expected exception ${exceptionClass}")
         } catch (e: Throwable) {
             if (exceptionClass.isInstance(e)) {
                 @Suppress("UNCHECKED_CAST")
@@ -259,6 +275,26 @@ object TT{
     }
 
 
+    inline fun withTempFile(f:(file:File)->Unit){
+        val file = TT.tempFile()
+        file.delete();
+        try{
+            f(file)
+        }finally {
+            if(!file.delete())
+                file.deleteOnExit()
+        }
+    }
+
+
+    inline fun withTempDir(f:(dir:File)->Unit){
+        val dir = TT.tempDir()
+        try{
+            f(dir)
+        }finally {
+            dir.deleteRecursively()
+        }
+    }
 }
 
 class TTTest{
@@ -283,12 +319,12 @@ class TTTest{
 
     @Test fun clone2(){
         val s = "djwqoidjioqwdjiqw 323423";
-        assertEquals(s, TT.clone(s, Serializer.STRING))
+        assertEquals(s, TT.clone(s, Serializers.STRING))
         assertEquals(s, TT.cloneJavaSerialization(s))
     }
 
     @Test fun tempFileName_textets(){
         val f = TT.tempFile()
-        assertTrue(f.name,f.name.startsWith("mapdbTest_org.mapdb.TTTest#tempFileName_textets:"))
+        assertTrue(f.name,f.name.startsWith("mapdbTest_org.mapdb.TTTest-tempFileName_textets-"))
     }
 }
