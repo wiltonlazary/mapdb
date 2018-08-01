@@ -66,7 +66,7 @@ class StoreOnHeap(
         }
     }
 
-    override fun <K> put(record: K, serializer: Serializer<K>): Long {
+    override fun <K> put(record: K?, serializer: Serializer<K>): Long {
         lock.lockWrite {
             val recid = preallocate2()
             records.put(recid, Pair(record, serializer as Serializer<Any>))
@@ -78,6 +78,21 @@ class StoreOnHeap(
         lock.lockWrite {
             if(!records.containsKey(recid))
                 throw DBException.RecidNotFound()
+            val newVal =
+                    if(newRecord==null) NULL_RECORD
+                    else Pair(newRecord,serializer as Serializer<Any>)
+            records.put(recid, newVal)
+        }
+    }
+
+
+    override fun <K> updateAtomic(recid: Long, serializer: Serializer<K>, m: (K?) -> K?) {
+        lock.lockWrite {
+            if(!records.containsKey(recid))
+                throw DBException.RecidNotFound()
+            val oldRec = check(records.get(recid)) as K?
+            val newRecord = m(oldRec);
+
             val newVal =
                     if(newRecord==null) NULL_RECORD
                     else Pair(newRecord,serializer as Serializer<Any>)
@@ -119,6 +134,17 @@ class StoreOnHeap(
         }
     }
 
+
+    override fun <E> getAndDelete(recid: Long, serializer: Serializer<E>): E? {
+        lock.lockWrite {
+            //TODO optimize
+            val ret = get(recid,serializer)
+            delete(recid, serializer)
+            return ret
+        }
+    }
+
+
     override fun verify() {
     }
 
@@ -130,6 +156,10 @@ class StoreOnHeap(
 
 
     override fun close() {
+    }
+
+    override fun isEmpty(): Boolean {
+        return maxRecid == 0L
     }
 
 }

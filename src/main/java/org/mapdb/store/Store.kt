@@ -21,19 +21,34 @@ interface Store: Closeable{
      * Function takes recid and binary data
      */
     fun getAll(consumer:(Long, ByteArray?)->Unit)
+
+
+    /**
+     * Returns true if store does not contain any data and no recids were allocated yet.
+     * Store is usually empty just after creation.
+     */
+    fun isEmpty():Boolean
 }
 
 /** Modifiable store */
 interface MutableStore:Store{
 
-    /** allocates new null record, and returns its recid. It can be latter updated with `update()` or `cas` */
+    /** allocates new null record, and returns its recid. It can be latter updated with `updateAtomic()` or `cas` */
     fun preallocate():Long
 
     /** insert new record, returns recid under which record was stored */
-    fun <K> put(record:K, serializer:Serializer<K>):Long
+    fun <K> put(record:K?, serializer:Serializer<K>):Long
 
-    /** update existing record with new value */
+    /** updateAtomic existing record with new value */
     fun <K> update(recid:Long, serializer: Serializer<K>, newRecord:K?)
+
+    fun <K> updateAtomic(recid: Long, serializer: Serializer<K>, m: (K?)->K?)
+
+    fun <K> updateWeak(recid: Long, serializer: Serializer<K>, m: (K?)->K?){
+        val oldRec = get(recid, serializer)
+        val newRec = m(oldRec)
+        update(recid, serializer, newRec)
+    }
 
     /** atomically compares and swap records
      * @return true if compare was sucessfull and record was swapped, else false
@@ -57,10 +72,15 @@ interface MutableStore:Store{
     //TODO bg operations?
     fun compact()
 
+    fun <E> getAndDelete(recid: Long, serializer: Serializer<E>): E?
+
 }
 
 
 object Recids{
+
+    @JvmStatic val RECID_NAME_PARAMS = 1L
+
 
     @JvmStatic val RECID_MAX_RESERVED = 63L
 }

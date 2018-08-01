@@ -23,19 +23,10 @@ class StoreAppend(
     ):MutableStore{
 
 
-    init{
-        val f = file.toFile()
-        assert(f.parentFile.canWrite())
-        assert(!f.exists())
-    }
-
     protected val c = FileChannel.open(file,
             StandardOpenOption.WRITE,
-            StandardOpenOption.CREATE_NEW,
+            StandardOpenOption.CREATE,
             StandardOpenOption.READ)
-    init{
-        DataIO.writeFully(c, ByteBuffer.allocate(8))
-    }
 
 
     protected val lock: ReadWriteLock? = if(isThreadSafe) ReentrantReadWriteLock() else null
@@ -47,7 +38,28 @@ class StoreAppend(
 
     protected var maxRecid:Long = 0
 
+    init{
+        val csize = c.size()
+        if(csize==0L) {
+            DataIO.writeFully(c, ByteBuffer.allocate(8))
+        }else{
+            var pos = 8L
+            //read record positions
+            while(pos<csize){
+                val offset = pos
+                val (recid, size) = readRecidSize(offset)
+                pos+=12 + Math.max(size,0)
 
+                offsets.put(recid,offset)
+                maxRecid = Math.max(recid, maxRecid)
+            }
+            //restore recids
+            for(recid in 1 until maxRecid){
+                if(!offsets.containsKey(recid))
+                    freeRecids.add(recid)
+            }
+        }
+    }
 
     protected fun readRecidSize(offset:Long):Pair<Long,Int>{
         val b = ByteBuffer.allocate(12)
@@ -89,20 +101,24 @@ class StoreAppend(
 
     override fun <K> get(recid: Long, serializer: Serializer<K>): K? {
         lock.lockRead {
-            val offset = offsets.getIfAbsent(recid, Long.MIN_VALUE)
-            if(offset==Long.MIN_VALUE)
-                throw DBException.RecidNotFound()
-
-            if(offset==0L)
-                return null
-
-            val (recid2, size) = readRecidSize(offset)
-            assert(recid==recid2)
-            val b = readRecord(offset+12, size)
-
-            val input = DataInput2ByteArray(b)
-            return serializer.deserialize(input)
+            return getNoLock(recid, serializer)
         }
+    }
+
+    private fun <K> getNoLock(recid: Long, serializer: Serializer<K>): K? {
+        val offset = offsets.getIfAbsent(recid, Long.MIN_VALUE)
+        if (offset == Long.MIN_VALUE)
+            throw DBException.RecidNotFound()
+
+        if (offset == 0L)
+            return null
+
+        val (recid2, size) = readRecidSize(offset)
+        assert(recid == recid2)
+        val b = readRecord(offset + 12, size)
+
+        val input = DataInput2ByteArray(b)
+        return serializer.deserialize(input)
     }
 
 
@@ -143,8 +159,8 @@ class StoreAppend(
         return recid
     }
 
-    override fun <K> put(record: K, serializer: Serializer<K>): Long {
-        val serialized = Serializers.serializeToByteArray(record, serializer)
+    override fun <K> put(record: K?, serializer: Serializer<K>): Long {
+        val serialized = Serializers.serializeToByteArrayNullable(record, serializer)
         lock.lockWrite {
             val recid = preallocate2()
             append(recid, serialized)
@@ -158,6 +174,15 @@ class StoreAppend(
         lock.lockWrite {
             if(!offsets.containsKey(recid))
                 throw DBException.RecidNotFound()
+            append(recid, serialized)
+        }
+    }
+
+    override fun <K> updateAtomic(recid: Long, serializer: Serializer<K>, m: (K?) -> K?) {
+        lock.lockWrite {
+            val oldRec = getNoLock(recid, serializer)!!
+            val newRec = m(oldRec)
+            val serialized = Serializers.serializeToByteArrayNullable(newRec, serializer)
             append(recid, serialized)
         }
     }
@@ -243,6 +268,15 @@ class StoreAppend(
         }
     }
 
+    override fun <E> getAndDelete(recid: Long, serializer: Serializer<E>): E? {
+        lock.lockWrite {
+            //TODO optimize
+            val ret = get(recid,serializer)
+            delete(recid, serializer)
+            return ret
+        }
+    }
+
 
     override fun close() {
         c.close()
@@ -256,6 +290,10 @@ class StoreAppend(
 
     override fun compact() {
 
+    }
+
+    override fun isEmpty(): Boolean {
+        return maxRecid == 0L
     }
 
 }

@@ -10,7 +10,10 @@ import org.mapdb.store.MutableStore
 import java.io.*
 import java.util.*
 import java.util.concurrent.*
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.Lock
+import java.util.concurrent.locks.ReadWriteLock
 
 /**
  * Unit tests utils
@@ -73,6 +76,13 @@ object TT{
                 return file
             }
         }
+    }
+
+    @JvmStatic fun tempNotExistFile():File{
+        val f = tempFile()
+        f.delete()
+        assertFalse(f.exists())
+        return f
     }
 
     @JvmStatic fun tempDir(): File {
@@ -262,6 +272,13 @@ object TT{
         return field.get(obj) as E
     }
 
+    fun reflectionSetField(obj:Any, newValue:Any?, name:String, clazz:Class<*> = obj.javaClass){
+        val field = clazz.getDeclaredField(name)
+        field.isAccessible = true
+        field.set(obj, newValue)
+    }
+
+
     /**
      * Catches expected exception, rethrows everything else.
      *
@@ -314,6 +331,22 @@ object TT{
 
     }
 
+
+    data class TestPojo(val a:String, val b:String):Serializable
+
+    /** random generator of any type */
+    object anyGen: Gen<Any>{
+        override fun always(): Iterable<Any> {
+            return listOf(1,2, 4L, listOf(1,2,4), "aa", TestPojo("aa", "bb"))
+        }
+
+        override fun random(): Sequence<Any> =
+            generateSequence {
+                Math.random()
+            }
+
+    }
+
     fun genFor(cl: Class<*>?): Gen<Any> = when (cl) {
 
         java.lang.Integer::class.java -> Gen.int()
@@ -321,8 +354,37 @@ object TT{
         java.lang.Double::class.java -> Gen.double()
         java.lang.String::class.java -> Gen.string()
         ByteArray::class.java -> byteArrayGen
+        null -> anyGen // generic serializers
 
         else -> throw AssertionError("unknown class $cl")
+    }
+
+    inline fun withBool(run:(b: AtomicBoolean)->Unit) {
+        val b = AtomicBoolean(true)
+        try {
+            run.invoke(b)
+        }finally {
+            b.set(false)
+        }
+    }
+
+    fun installValidateReadWriteLock(v:Validate, fieldName:String){
+        val origLock = reflectionGetField<ReadWriteLock>(v, fieldName, v.javaClass)
+
+        val writeVLock = object:Lock by origLock.writeLock(){
+            override fun unlock() {
+               origLock.writeLock().unlock()
+                v.validate()
+            }
+        }
+
+        val vLock = object:ReadWriteLock by origLock{
+            override fun writeLock(): Lock {
+                return writeVLock
+            }
+        }
+
+        reflectionSetField(v, vLock, fieldName, v.javaClass)
     }
 
 }

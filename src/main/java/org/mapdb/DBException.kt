@@ -8,7 +8,11 @@ open class DBException(msg:String): RuntimeException(msg) {
 
     class PointerChecksumBroken():DBException("data corrupted")
 
-    class WrongConfig(msg: String) : DBException(msg)
+    open class WrongConfig(msg: String) : DBException(msg)
 
-    class StoreReentry(): DBException("Can not modify store during update")
+    class WrongSerializer(msg:String) : WrongConfig(msg)
+
+    class StoreReentry(): DBException("Can not modify store during updateAtomic")
+
+    class DataAssert(msg:String = "data corrupted"):DBException(msg)
 }
