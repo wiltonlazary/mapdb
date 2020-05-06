@@ -9,7 +9,7 @@ import org.junit.Test
 import org.mapdb.io.*
 import org.mapdb.ser.Serializer
 import org.mapdb.ser.Serializers
-import org.mapdb.store.MutableStore
+import org.mapdb.store.Store
 import java.io.*
 import java.time.Duration
 import java.util.*
@@ -41,7 +41,7 @@ object TT{
         return ret
     }
 
-    @JvmStatic fun randomFillStore(store: MutableStore, size:Int=1000, seed:Long=Random().nextLong()){
+    @JvmStatic fun randomFillStore(store: Store, size:Int=1000, seed:Long=Random().nextLong()){
         val random = Random(seed)
         for(i in 0..size){
             val bytes = randomByteArray(random.nextInt(100),seed=random.nextInt());
@@ -117,7 +117,7 @@ object TT{
 
 
         override fun serializedType() = throw AssertionError("No access")
-        override fun serialize(value: Any, out: DataOutput2) {
+        override fun serialize(out: DataOutput2, value: Any) {
             throw AssertionError("Should not access this serializer")
         }
 
@@ -155,7 +155,7 @@ object TT{
     /* clone value using serialization */
     @JvmStatic fun <E> clone(value: E, serializer: Serializer<*>, out:DataOutput2 = DataOutput2ByteArray()): E {
         @Suppress("UNCHECKED_CAST")
-        (serializer as Serializer<E>).serialize(value, out)
+        (serializer as Serializer<E>).serialize(out, value)
         val in2 = DataInput2ByteArray(out.copyBytes())
         return serializer.deserialize(in2)
     }
@@ -174,7 +174,7 @@ object TT{
 
     @JvmStatic fun <E> serializedSize(value: E, serializer: Serializer<*>, out:DataOutput2 = DataOutput2ByteArray()): Int {
         @Suppress("UNCHECKED_CAST")
-        (serializer as Serializer<E>).serialize(value, out)
+        (serializer as Serializer<E>).serialize(out, value)
         return out.copyBytes().size;
     }
 
@@ -371,6 +371,7 @@ object TT{
             b.set(false)
         }
     }
+/*
 
     fun installValidateReadWriteLock(v:Validate, fieldName:String){
         val origLock = reflectionGetField<ReadWriteLock>(v, fieldName, v.javaClass)
@@ -390,6 +391,7 @@ object TT{
 
         reflectionSetField(v, vLock, fieldName, v.javaClass)
     }
+*/
 
 }
 
