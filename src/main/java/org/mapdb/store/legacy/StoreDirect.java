@@ -15,11 +15,13 @@
  */
 package org.mapdb.store.legacy;
 
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 import org.mapdb.CC;
+import org.mapdb.DBException;
 import org.mapdb.io.DataOutput2ByteArray;
 import org.mapdb.ser.Serializer;
 import org.mapdb.ser.Serializers;
-import org.mapdb.store.Recids;
 
 import java.io.File;
 import java.io.IOError;
@@ -62,7 +64,7 @@ import java.util.concurrent.locks.Lock;
  *  4           | {@link StoreDirect#IO_INDEX_SUM}  | Checksum of all Index file headers. Checks if store was closed correctly
  *  5..9        |                                   | Reserved for future use
  *  10..14      |                                   | For usage by user
- *  15          | {@link StoreDirect#IO_FREE_RECID} |Long Stack of deleted recids, those will be reused and returned by {@link Engine#put(Object, Serializer)}
+ *  15          | {@link StoreDirect#IO_FREE_RECID} |Long Stack of deleted recids, those will be reused and returned by {@code Engine#put(Object, Serializer)}
  *  16..4111    |                                   |Long Stack of free physical records. This contains free space released by record update or delete. Each slots corresponds to free record size. TODO check 4111 is right
  *  4112        | {@link StoreDirect#IO_USER_START} |Record size and offset in physical file for recid=1
  *  4113        |                                   |Record size and offset in physical file for recid=2
@@ -103,7 +105,7 @@ import java.util.concurrent.locks.Lock;
  * 0-15     |`val>>>48`                                 | record size
  * 16-59    |`val&{@link StoreDirect#MASK_OFFSET}`      | physical offset
  * 60       |`val&{@link StoreDirect#MASK_LINKED}!=0`   | linked record flag
- * 61       |`val&{@link StoreDirect#MASK_DISCARD}!=0`  | to be discarded while storage is offline flag
+ * 61       |`val&{@link StoreDirect#MASK_PREALLOC}!=0`  | to be discarded while storage is offline flag
  * 62       |`val&{@link StoreDirect#MASK_ARCHIVE}!=0`  | record modified since last backup flag
  * 63       |                                           | not used yet
  *
@@ -126,7 +128,7 @@ public class StoreDirect extends Store2 {
     protected static final long MASK_OFFSET = 0x0000FFFFFFFFFFF0L;
 
     protected static final long MASK_LINKED = 0x8L;
-    protected static final long MASK_DISCARD = 0x4L;
+    protected static final long MASK_PREALLOC = 0x4L;
     protected static final long MASK_ARCHIVE = 0x2L;
 
     /** 4 byte file header */
@@ -165,6 +167,8 @@ public class StoreDirect extends Store2 {
     protected final static int LONG_STACK_PREF_COUNT_ALTER = 212;
     protected final static long LONG_STACK_PREF_SIZE_ALTER = 8+LONG_STACK_PREF_COUNT_ALTER*6;
 
+
+    protected static final long INDEX_VAL_ZERO_SIZE = MASK_ARCHIVE + 16;
 
 
     protected Volume index;
@@ -252,7 +256,12 @@ public class StoreDirect extends Store2 {
         this(volFac, false,false,5,false,0L);
     }
 
-
+    protected void checkNotDeleted(long indexVal){
+        if((indexVal & MASK_PREALLOC)!=0)
+            throw new DBException.PreallocRecordAccess();
+        if((indexVal & MASK_OFFSET)==0)
+            throw new DBException.RecordNotFound();
+    }
 
     protected void checkHeaders() {
         if(index.getInt(0)!=HEADER||phys.getInt(0)!=HEADER)
@@ -275,7 +284,7 @@ public class StoreDirect extends Store2 {
     }
 
     protected void createStructure() {
-        indexSize = IO_USER_START+ Recids.RECID_MAX_RESERVED*8+8;
+        indexSize = IO_USER_START+ 0*8+8;
         assert(indexSize>IO_USER_START);
         index.ensureAvailable(indexSize);
         for(int i=0;i<indexSize;i+=8) index.putLong(i,0L);
@@ -319,7 +328,7 @@ public class StoreDirect extends Store2 {
             final Lock lock  = locks.writeLock();
             lock.lock();
             try{
-                index.putLong(ioRecid,MASK_DISCARD);
+                index.putLong(ioRecid, MASK_PREALLOC);
             }finally {
                 lock.unlock();
             }
@@ -331,6 +340,26 @@ public class StoreDirect extends Store2 {
         }finally {
             newRecidLock.readLock().unlock();
         }
+    }
+
+    @Override
+    public <R> void preallocatePut(long recid, @Nullable Serializer<R> serializer, @NotNull R value) {
+        assert(value!=null);
+        assert(recid>0);
+        DataOutput2ByteArray out = serialize(value, serializer);
+
+        final long ioRecid = IO_USER_START + recid*8;
+
+        final Lock lock  = locks.writeLock();
+        lock.lock();
+        try{
+            update2(out, ioRecid, true);
+        }finally{
+            lock.unlock();
+        }
+        if(CC.LOG_STORE)
+            LOG.finest("Update recid="+recid+", "+" size="+out.pos+", "+" val="+value+" ser="+serializer );
+
     }
 
     @Override
@@ -349,7 +378,7 @@ public class StoreDirect extends Store2 {
                 final Lock lock  = locks.writeLock();
                 lock.lock();
                 try{
-                    index.putLong(ioRecid,MASK_DISCARD);
+                    index.putLong(ioRecid, MASK_PREALLOC);
                 }finally {
                     lock.unlock();
                 }
@@ -401,6 +430,10 @@ public class StoreDirect extends Store2 {
 
     protected void put2(DataOutput2ByteArray out, long ioRecid, long[] indexVals) {
         assert(locks.writeLock().isHeldByCurrentThread());
+        if(out.pos==0){
+            index.putLong(ioRecid, INDEX_VAL_ZERO_SIZE);
+            return;
+        }
         index.putLong(ioRecid, indexVals[0]|MASK_ARCHIVE);
         //write stuff
         if(indexVals.length==1||indexVals[1]==0){ //is more then one? ie linked
@@ -453,12 +486,15 @@ public class StoreDirect extends Store2 {
                 locks.writeLock().isHeldByCurrentThread());
 
         long indexVal = index.getLong(ioRecid);
-        if(indexVal == MASK_DISCARD) return null; //preallocated record
+        checkNotDeleted(indexVal);
+        if(indexVal == MASK_PREALLOC) throw new DBException.PreallocRecordAccess();
 
         int size = (int) (indexVal>>>48);
         DataInput2Exposed di;
         long offset = indexVal&MASK_OFFSET;
-        if((indexVal& MASK_LINKED)==0){
+        if(indexVal == INDEX_VAL_ZERO_SIZE) {
+            di = new DataInput2Exposed(ByteBuffer.allocate(0));
+        }else if((indexVal& MASK_LINKED)==0){
             //read single record
             di = phys.getDataInput(offset, size);
 
@@ -484,7 +520,9 @@ public class StoreDirect extends Store2 {
                 //is the next part last?
                 c =  ((next& MASK_LINKED)==0)? 0 : 8;
             }
-            di = new DataInput2Exposed(ByteBuffer.wrap(buf));
+            ByteBuffer buf2 = ByteBuffer.wrap(buf);
+            buf2.limit(pos);
+            di = new DataInput2Exposed(buf2);
             size = pos;
         }
         return deserialize(serializer, size, di);
@@ -503,7 +541,7 @@ public class StoreDirect extends Store2 {
         final Lock lock  = locks.writeLock();
         lock.lock();
         try{
-            update2(out, ioRecid);
+            update2(out, ioRecid, false);
         }finally{
             lock.unlock();
         }
@@ -523,7 +561,7 @@ public class StoreDirect extends Store2 {
             R newRec = r.transform(old);
             if(old==newRec)
                 return;
-            update2(serialize(newRec, serializer), ioRecid);
+            update2(serialize(newRec, serializer), ioRecid, false);
         } catch (IOException e) {
             throw new IOError(e);
         } finally{
@@ -532,13 +570,21 @@ public class StoreDirect extends Store2 {
 
     }
 
-    protected void update2(DataOutput2ByteArray out, long ioRecid) {
+    protected void update2(DataOutput2ByteArray out, long ioRecid, boolean prealoc) {
         final long indexVal = index.getLong(ioRecid);
         final int size = (int) (indexVal>>>48);
         final boolean linked = (indexVal&MASK_LINKED)!=0;
         assert(locks.writeLock().isHeldByCurrentThread());
 
-        if(!linked && out.pos>0 && size>0 && size2ListIoRecid(size) == size2ListIoRecid(out.pos)){
+        if(!prealoc)
+            checkNotDeleted(indexVal);
+        else if(indexVal != MASK_PREALLOC){
+            throw new DBException.RecordNotPreallocated();
+        }
+
+        if((prealoc || size==0) && out.pos==0){
+            index.putLong(ioRecid, INDEX_VAL_ZERO_SIZE);
+        }else if(!linked && out.pos>0 && size>0 && size2ListIoRecid(size) == size2ListIoRecid(out.pos)){
             //size did change, but still fits into this location
             final long offset = indexVal & MASK_OFFSET;
 
@@ -579,7 +625,6 @@ public class StoreDirect extends Store2 {
 
     @Override
     public <A> boolean compareAndUpdate(long recid, Serializer<A> serializer, A expectedOldValue, A newValue) {
-        assert(expectedOldValue!=null && newValue!=null);
         assert(recid>0);
         final long ioRecid = IO_USER_START + recid*8;
         final Lock lock  = locks.writeLock();
@@ -604,7 +649,7 @@ public class StoreDirect extends Store2 {
              */
              out = serialize(newValue, serializer);
 
-            update2(out, ioRecid);
+            update2(out, ioRecid, false);
 
         }catch(IOException e){
             throw new IOError(e);
@@ -621,8 +666,7 @@ public class StoreDirect extends Store2 {
 
     @Override
     public boolean isEmpty() {
-        //TODO better check
-        return getMaxRecid()>Recids.RECID_MAX_RESERVED;
+        return getMaxRecid()<=1L;
     }
 
     @Override
@@ -634,9 +678,11 @@ public class StoreDirect extends Store2 {
         try{
             //get index val and zero it out
             final long indexVal = index.getLong(ioRecid);
+            checkNotDeleted(indexVal);
+
             index.putLong(ioRecid,0L|MASK_ARCHIVE);
 
-            if(!spaceReclaimTrack) return; //free space is not tracked, so do not mark stuff as free
+            if(!spaceReclaimTrack || indexVal==INDEX_VAL_ZERO_SIZE) return; //free space is not tracked, so do not mark stuff as free
 
             long[] linkedRecords = getLinkedRecordsIndexVals(indexVal);
 
@@ -855,7 +901,6 @@ public class StoreDirect extends Store2 {
             boolean asyncWriteEnabled = index instanceof Volume.ByteBufferVol && ((Volume.ByteBufferVol)index).asyncWriteEnabled;
             Volume.Factory fab = Volume.fileFactory(compactedFile,rafMode,false,sizeLimit,  VOLUME_CHUNK_SHIFT,0,
                     new File(compactedFile.getPath() + StoreDirect.DATA_FILE_EXT),
-                    new File(compactedFile.getPath() + StoreWAL.TRANS_LOG_FILE_EXT),
                     asyncWriteEnabled);
             StoreDirect store2 = new StoreDirect(fab,false,false,5,false,0L);
 
@@ -923,7 +968,6 @@ public class StoreDirect extends Store2 {
 
                 final Volume.Factory fac2 = Volume.fileFactory(indexFile,rafMode, false, sizeLimit, VOLUME_CHUNK_SHIFT,0,
                         new File(indexFile.getPath() + StoreDirect.DATA_FILE_EXT),
-                        new File(indexFile.getPath() + StoreWAL.TRANS_LOG_FILE_EXT),
                         asyncWriteEnabled);
                 index = fac2.createIndexVolume();
                 phys = fac2.createPhysVolume();
@@ -1257,7 +1301,23 @@ public class StoreDirect extends Store2 {
 
     @Override
     public void getAll(GetAllCallback callback) {
-        throw new UnsupportedOperationException("TODO");
+        locks.readLock().lock();
+        try{
+            long recid = 1;
+            long maxrecid = getMaxRecid();
+            while(recid<maxrecid){
+                byte[] b = null;
+                try {
+                    b = get(recid, Serializers.BYTE_ARRAY_NOSIZE);
+                }catch(DBException e){
+                }
+                if(b!=null)
+                    callback.takeOne(recid, b);
+                recid+=1;
+            }
+        }finally {
+            locks.readLock().unlock();
+        }
     }
 
     protected long countLongStackItems(long ioList){

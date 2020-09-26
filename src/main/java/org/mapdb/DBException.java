@@ -1,8 +1,6 @@
 package org.mapdb;
 
 
-import java.nio.file.Path;
-
 public class DBException extends RuntimeException {
 
     public DBException(Exception cause){
@@ -37,10 +35,9 @@ public class DBException extends RuntimeException {
         }
     }
 
-
-    public static class RecidNotFound extends DBException{
-        public RecidNotFound(){
-            super("recid not found");
+    public static class PreallocRecordAccess extends DBException{
+        public PreallocRecordAccess(){
+            super("preallocated record accessed");
         }
     }
 
@@ -93,6 +90,13 @@ public class DBException extends RuntimeException {
 
         public TODO(String msg) {
             super(msg);
+        }
+    }
+
+    public static class RecordNotPreallocated extends DBException {
+
+        public RecordNotPreallocated() {
+            super("Record was not preallocated");
         }
     }
 }
